@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -71,13 +72,12 @@ class AuditLog:
 
     def _persist(self) -> None:
         tmp = self._path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
+        with open(tmp, "w") as f:  
             for entry in self._entries:
                 f.write(json.dumps(entry.to_dict(), separators=(",",":")) + "\n")
             f.flush()   
-            import os
             os.fsync(f.fileno())
-        import os
+        
         os.replace(tmp, self._path)
 
     def append(self, op:str, namespace: str, item_id: str) -> AuditEntry:

@@ -195,7 +195,9 @@ class TestEdgeCases:
     def test_invalid_namespace_raises(self, vault_path):
         v1 = AegisVault(vault_path, "pass")
         with pytest.raises(LocalStorageError):
-            v1.save("invalid_namespace", "doc_01", {})
+            v1.save("", "doc_01", {})
+        with pytest.raises(LocalStorageError):
+            v1.save("bad\\name", "doc_01", {})
 
     def test_overwrite_and_load_latest(self, vault_path):
         v1 = AegisVault(vault_path, "pass")

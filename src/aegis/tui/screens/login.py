@@ -72,7 +72,7 @@ class LoginScreen(ModalScreen):
             if self._bio_available:
                 yield Button("Unlock with Windows Hello", id="bio-btn", variant="success")
 
-            yield Button("Save passphrase for next time", id="setup-btn", variant="default")
+            yield Button("Save for Windows Hello", id="setup-btn", variant="default")
 
     def _check_biometric(self) -> bool:
         try:
@@ -118,16 +118,21 @@ class LoginScreen(ModalScreen):
         bio_btn = self.query_one("#bio-btn", Button)
         bio_btn.label = "Authenticating..."
         bio_btn.disabled = True
+        self.notify("Scan your fingerprint...", severity="info")
+        from aegis.biometric import _hide_console
+        _hide_console()
         self._run_biometric()
 
     @work(thread=True, group="biometric")
     def _run_biometric(self):
+        from aegis.biometric import BiometricUnlock, _show_console
         try:
-            from aegis.biometric import BiometricUnlock
             bio = BiometricUnlock()
-            pw = bio.unlock()
+            pw = bio.unlock(console=False)
+            _show_console()
             self.app.call_from_thread(self._on_biometric_success, pw)
         except Exception as e:
+            _show_console()
             self.app.call_from_thread(self._on_biometric_fail, str(e))
 
     def _on_biometric_success(self, pw):

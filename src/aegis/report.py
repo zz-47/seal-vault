@@ -152,7 +152,7 @@ class ComplianceReport:
                 "name": ctrl["name"],
                 "description": ctrl["description"],
                 "requirement": ctrl["requirement"],
-                "status": "COMPLIANT" if relevant or chain_valid else "NO_DATA",
+                "status": "COMPLIANT" if relevant else "NO_DATA",
                 "evidence_count": len(relevant),
                 "sample_operations": [
                     {"op": e.op, "namespace": e.namespace,

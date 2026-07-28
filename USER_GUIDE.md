@@ -110,13 +110,23 @@ Create a new encrypted vault.
 ```bash
 seal init --path ./my-vault --passphrase "secret"
 seal init -P ./my-vault -p "secret" --cipher chacha20
+seal init --passphrase "secret" --json
 ```
 
 | Option | Values | Default |
 |--------|--------|---------|
-| `--path, -P` | directory path | *required* |
+| `--path, -P` | directory path | `%LOCALAPPDATA%\Seal\vaults\my-vault` |
 | `--passphrase, -p` | text | *prompted* |
 | `--cipher` | `aes-gcm`, `chacha20` | `aes-gcm` |
+| `--json` | flag | off |
+
+### `seal` (no arguments)
+
+Lists all registered vaults from the registry at `%LOCALAPPDATA%\Seal\vaults.json` and prints a hint to use `seal --help`.
+
+```bash
+seal
+```
 
 ### `seal save`
 
@@ -129,7 +139,7 @@ seal save -n work -i config -f config.json
 
 | Option | Description |
 |--------|-------------|
-| `-n, --ns` | Namespace: `personal`, `work`, `archive` |
+| `-n, --ns` | Namespace — any label you like (e.g. `personal`, `banking`, `recipes`) |
 | `-i, --id` | Item identifier |
 | `-d, --data` | JSON data string |
 | `-f, --file` | Read JSON from file |
@@ -171,6 +181,15 @@ seal delete -n personal -i doc1
 | Option | Description |
 |--------|-------------|
 | `-y, --yes` | Skip confirmation prompt |
+
+### `seal doctor`
+
+Check vault health — audit chain, canary status, manifest integrity.
+
+```bash
+seal doctor
+seal doctor --json
+```
 
 ### `seal verify`
 
@@ -234,7 +253,69 @@ Launch the interactive terminal UI. See [TUI section](#tui-terminal-user-interfa
 
 ```bash
 seal version
-# seal 0.1.0
+# seal 0.3.0
+```
+
+### `seal encrypt`
+
+Encrypt a file or folder (no vault required).
+
+```bash
+seal encrypt -i secrets.txt -o secrets.txt.enc
+seal encrypt -i ./my-folder -o ./my-folder.enc
+```
+
+| Option | Description |
+|--------|-------------|
+| `-i, --input` | File or folder to encrypt |
+| `-o, --output` | Output path |
+| `-p, --passphrase` | Encryption passphrase (prompted, confirmed) |
+
+### `seal decrypt`
+
+Decrypt a file created by `seal encrypt`.
+
+```bash
+seal decrypt -i secrets.txt.enc -o secrets.txt
+seal decrypt -i my-folder.enc -o ./restored-folder
+```
+
+| Option | Description |
+|--------|-------------|
+| `-i, --input` | Encrypted file to decrypt |
+| `-o, --output` | Output path |
+| `-p, --passphrase` | Decryption passphrase |
+
+### `seal vaults`
+
+Manage multiple vaults.
+
+```bash
+seal vaults list                           # list registered vaults (scans default dir)
+seal vaults list --json                    # machine-readable JSON output
+seal vaults add -n work -P ./my-work-vault # register a vault
+seal vaults remove -n work                 # remove from registry
+```
+
+### `seal biometric`
+
+Windows Hello biometric unlock.
+
+```bash
+seal biometric enroll -P ./my-vault -p "passphrase"  # store passphrase
+seal biometric remove                                  # remove stored passphrase
+```
+
+### `seal ask`
+
+Natural language routing to CLI commands.
+
+```bash
+seal ask "save my gmail password"
+seal ask "list all passwords"
+seal ask "generate a 32 character password"
+seal ask "check vault health"
+seal ask "save my wifi password" -x -P ./my-vault -p "pass"  # execute
 ```
 
 ---
@@ -252,9 +333,13 @@ seal tui --path ./my-vault
 
 ### Screens
 
-#### 1. Login
+#### 1. Vault Picker
 
-On launch, you see a login screen. Enter your master passphrase and press Enter or click **Unlock**.
+When launched without `-P`, the TUI opens a vault picker showing registered vaults. Select a vault and click **Open** to proceed to login.
+
+#### 2. Login
+
+Enter your master passphrase and press Enter or click **Unlock**.
 
 #### 2. Vault Browser
 
@@ -263,7 +348,8 @@ After login, the vault browser shows:
 - **Left panel**: Table of all entries (Namespace + Item columns)
 - **Right panel**: Details of the selected entry (JSON formatted)
 - **Top bar**: Search field for filtering
-- **Bottom bar**: Status (entry count)
+- **Bottom bar**: Status (entry count) and action buttons (Tools, Verify, Report, Canary)
+- **Tools button**: Opens the file encryption/decryption screen (same as `Ctrl+T`)
 
 Click any row to view its contents.
 
@@ -273,8 +359,15 @@ Click any row to view its contents.
 |----------|--------|
 | `Ctrl+Q` | Quit |
 | `Ctrl+V` | Verify vault integrity (audit + canary) |
-| `Ctrl+G` | Open password generator |
+| `Ctrl+R` | Open compliance report |
+| `Ctrl+Y` | Open canary management |
+| `Ctrl+T` | Open file encrypt/decrypt screen |
+| `Ctrl+O` | Open vault (picker) |
+| `Ctrl+N` | Create new entry |
+| `Ctrl+E` | Edit selected entry |
+| `Ctrl+D` | Delete selected entry |
 | `Ctrl+F` | Focus search bar |
+| `Ctrl+G` | Open password generator |
 | `Escape` | Go back / close screen |
 
 ### Password Generator
@@ -285,6 +378,35 @@ Press `Ctrl+G` to open the password generator:
 - The generated password appears in the output field
 - Click **Regenerate** for a new password
 - Click **Copy to Clipboard** (requires `pyperclip`)
+
+### File Encrypt / Decrypt
+
+Press `Ctrl+T` (or click **Encrypt (Ctrl+T)** in the vault screen toolbar) to open the file encrypt/decrypt screen:
+
+- Use **Browse** buttons to select source and destination paths via the file browser, or type paths directly
+- Enter an encryption/decryption passphrase (pre-filled from vault passphrase if available)
+- If the output path is a directory, the filename is auto-derived from the input
+- Vault passphrase is pre-filled when opened from an unlocked vault
+
+### File Browser
+
+The file browser opens when you click a **Browse** button on the encrypt/decrypt screen:
+
+- **File list**: Shows directory contents sorted with folders first
+- **`..`** entry navigates to the parent directory
+- **Click a folder** to navigate into it
+- **Click a file** to select it (returns the path to the caller)
+- **Enter path** directly in the input field at the top
+- **Select button** returns the current directory path
+- Starts on your Desktop directory
+
+### Help Screen
+
+Press `Ctrl+H` in the vault screen or picker to open the help screen:
+
+- Full keyboard shortcut reference for all TUI screens
+- Common CLI usage examples
+- Click **Close** or press `Escape` to dismiss
 
 ### Verify Integrity
 
@@ -375,13 +497,16 @@ sm.unshare_vault(user_id)                  # revoke access
 
 ## Namespaces
 
-| Namespace | Purpose |
-|-----------|---------|
-| `personal` | Personal documents, passwords, notes |
-| `work` | Work-related files, configs, API keys |
-| `archive` | Long-term storage, backups |
+Namespaces are free-form labels — use any string you like:
 
-All three are created when you initialize a vault. Items are isolated by namespace — AAD binding prevents cross-namespace file swaps.
+| Example | Purpose |
+|---------|---------|
+| `personal` | Personal documents, passwords, notes |
+| `banking` | Financial credentials |
+| `work` | Work-related files, configs, API keys |
+| `recipes` | Anything you want |
+
+Items are isolated by namespace — AAD binding prevents cross-namespace file swaps.
 
 ---
 

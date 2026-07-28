@@ -127,4 +127,4 @@ class ReportScreen(Screen):
             self.notify(f"Export failed: {e}", severity="error")
 
     def action_go_back(self):
-        self.app.pop_screen()
+        self.app._pop_or_exit()

@@ -10,7 +10,66 @@ from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual import on
 from textual.binding import Binding
 
-from aegis.tui._constants import DEFAULT_NAMESPACES
+
+
+
+
+class LeaveVaultScreen(ModalScreen):
+    """Ask passphrase before leaving the vault."""
+
+    CSS = """
+    LeaveVaultScreen {
+        align: center middle;
+    }
+    #leave-box {
+        width: 50;
+        height: auto;
+        padding: 2 4;
+        border: thick $warning;
+        background: $surface;
+    }
+    #leave-box Label {
+        width: 100%;
+        text-align: center;
+        margin-bottom: 1;
+    }
+    #leave-passphrase {
+        width: 100%;
+        margin-top: 1;
+    }
+    #leave-confirm-btn {
+        width: 100%;
+        margin-top: 1;
+    }
+    #leave-cancel-btn {
+        width: 100%;
+        margin-top: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="leave-box"):
+            yield Label("[bold yellow]Leave Vault[/]")
+            yield Label("Enter passphrase to leave the vault")
+            yield Input(password=True, placeholder="Passphrase", id="leave-passphrase")
+            yield Button("Leave", id="leave-confirm-btn", variant="warning")
+            yield Button("Stay", id="leave-cancel-btn", variant="default")
+
+    @on(Button.Pressed, "#leave-confirm-btn")
+    def confirm_leave(self):
+        entered = self.query_one("#leave-passphrase", Input).value
+        if entered != self.app.passphrase:
+            self.notify("Wrong passphrase", severity="error")
+            return
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#leave-cancel-btn")
+    def cancel_leave(self):
+        self.dismiss(False)
+
+    @on(Input.Submitted, "#leave-passphrase")
+    def on_passphrase_submitted(self):
+        self.confirm_leave()
 
 
 class VaultScreen(Screen):
@@ -58,6 +117,7 @@ class VaultScreen(Screen):
         Binding("ctrl+e", "edit_item", "Edit"),
         Binding("ctrl+d", "delete_item", "Delete"),
         Binding("ctrl+g", "generate", "Generate"),
+        Binding("ctrl+h", "help", "Help"),
         Binding("escape", "go_back", "Back"),
     ]
 
@@ -67,6 +127,7 @@ class VaultScreen(Screen):
             yield Button("New (Ctrl+N)", id="new-btn", variant="success")
             yield Button("Edit (Ctrl+E)", id="edit-btn", variant="default")
             yield Button("Delete (Ctrl+D)", id="del-btn", variant="error")
+            yield Button("Encrypt (Ctrl+T)", id="tools-btn", variant="default")
         with Vertical(id="sidebar"):
             yield DataTable(id="vault-table")
         with Vertical(id="detail"):
@@ -74,7 +135,7 @@ class VaultScreen(Screen):
             yield Static("", id="detail-content")
             yield Button("Copy Value", id="copy-btn", variant="primary")
         yield Static(
-            "Ctrl+N New  Ctrl+E Edit  Ctrl+D Delete  Ctrl+F Search  Ctrl+G Generate  Esc Back",
+            "Ctrl+N New  Ctrl+E Edit  Ctrl+D Delete  Ctrl+F Search  Ctrl+G Generate  Ctrl+T Encrypt  Ctrl+H Help  Esc Back",
             id="status-bar",
         )
 
@@ -92,8 +153,13 @@ class VaultScreen(Screen):
         app = self.app
         if not self.app.vault:
             return
+        vault_dir = app.vault._base_path
+        namespaces = sorted(
+            d.name for d in vault_dir.iterdir()
+            if d.is_dir() and not d.name.startswith(".") and d.name != "keys"
+        )
         self._all_items = []
-        for ns in DEFAULT_NAMESPACES:
+        for ns in namespaces:
             try:
                 items = app.vault.list_items(ns)
                 for item in items:
@@ -115,7 +181,7 @@ class VaultScreen(Screen):
 
     @on(DataTable.RowSelected)
     def show_entry(self, event):
-        if event.row_key is None:
+        if event.row_key is None or not self.app.vault:
             return
         table = self.query_one("#vault-table", DataTable)
         row = table.get_row(event.row_key)
@@ -151,7 +217,7 @@ class VaultScreen(Screen):
 
     @on(Button.Pressed, "#edit-btn")
     def action_edit_item(self):
-        if not self._selected:
+        if not self._selected or not self.app.vault:
             self.notify("Select an entry first", severity="warning")
             return
         ns, item_id = self._selected
@@ -161,9 +227,16 @@ class VaultScreen(Screen):
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
 
+    @on(Button.Pressed, "#tools-btn")
+    def action_tools(self):
+        self.app.action_tools()
+
+    def action_help(self):
+        self.app.action_help()
+
     @on(Button.Pressed, "#del-btn")
     def action_delete_item(self):
-        if not self._selected:
+        if not self._selected or not self.app.vault:
             self.notify("Select an entry first", severity="warning")
             return
         ns, item_id = self._selected
@@ -173,7 +246,10 @@ class VaultScreen(Screen):
         self.query_one("#search-bar", Input).focus()
 
     def action_go_back(self):
-        self.app.pop_screen()
+        def _on_leave(result):
+            if result:
+                self.app._pop_to_picker()
+        self.app.push_screen(LeaveVaultScreen(), _on_leave)
 
     def action_generate(self):
         from aegis.tui.screens.generator import GeneratorScreen
@@ -181,7 +257,7 @@ class VaultScreen(Screen):
 
     @on(Button.Pressed, "#copy-btn")
     def copy_entry_value(self):
-        if not self._selected:
+        if not self._selected or not self.app.vault:
             self.notify("Select an entry first", severity="warning")
             return
         ns, item_id = self._selected
@@ -202,7 +278,7 @@ class VaultScreen(Screen):
 
 
 class DeleteConfirmScreen(ModalScreen):
-    """Confirmation dialog for delete."""
+    """Confirmation dialog for delete — requires passphrase."""
 
     CSS = """
     DeleteConfirmScreen {
@@ -219,6 +295,10 @@ class DeleteConfirmScreen(ModalScreen):
         width: 100%;
         text-align: center;
         margin-bottom: 1;
+    }
+    #delete-passphrase {
+        width: 100%;
+        margin-top: 1;
     }
     #confirm-btn {
         width: 100%;
@@ -239,21 +319,35 @@ class DeleteConfirmScreen(ModalScreen):
         with Vertical(id="confirm-box"):
             yield Label("[bold red]Delete Item[/]")
             yield Label(f"Delete [bold]{self.namespace}/{self.item_id}[/]?\n[dim]This cannot be undone.[/]")
+            yield Input(password=True, placeholder="Enter passphrase to confirm", id="delete-passphrase")
             yield Button("Delete", id="confirm-btn", variant="error")
             yield Button("Cancel", id="cancel-btn", variant="default")
 
     @on(Button.Pressed, "#confirm-btn")
     def confirm_delete(self):
+        if not self.app.vault:
+            self.notify("No vault open", severity="error")
+            self.dismiss(False)
+            return
+        entered = self.query_one("#delete-passphrase", Input).value
+        if entered != self.app.passphrase:
+            self.notify("Wrong passphrase", severity="error")
+            return
         try:
             self.app.vault.delete(self.namespace, self.item_id)
             self.notify(f"Deleted {self.namespace}/{self.item_id}", severity="success")
+            self.dismiss(True)
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
-        self.dismiss(True)
+            self.dismiss(False)
 
     @on(Button.Pressed, "#cancel-btn")
     def cancel_delete(self):
         self.dismiss(False)
+
+    @on(Input.Submitted, "#delete-passphrase")
+    def on_passphrase_submitted(self):
+        self.confirm_delete()
 
 
 class NewItemScreen(Screen):
@@ -261,7 +355,7 @@ class NewItemScreen(Screen):
 
     CSS = """
     NewItemScreen { padding: 1 2; }
-    #ns-select { width: 100%; margin-bottom: 1; }
+    #ns-input { width: 100%; margin-bottom: 1; }
     #item-id-input { width: 100%; margin-bottom: 1; }
     #kv-container {
         height: 1fr;
@@ -286,11 +380,7 @@ class NewItemScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Label("[bold]New Entry[/]")
-        yield Select(
-            [(ns, ns) for ns in DEFAULT_NAMESPACES],
-            id="ns-select",
-            prompt="Namespace",
-        )
+        yield Input(placeholder="Namespace (e.g. personal, banking, work)", id="ns-input")
         yield Input(placeholder="Item ID (e.g. gmail, wifi-home)", id="item-id-input")
         yield Label("[dim]Key-value pairs:[/]", id="fields-label")
         with ScrollableContainer(id="kv-container"):
@@ -330,9 +420,12 @@ class NewItemScreen(Screen):
 
     @on(Button.Pressed, "#save-btn")
     def save_entry(self):
-        ns = self.query_one("#ns-select", Select).value
-        if ns is Select.NULL:
-            self.notify("Select a namespace", severity="warning")
+        if not self.app.vault:
+            self.notify("No vault open", severity="error")
+            return
+        ns = self.query_one("#ns-input", Input).value.strip()
+        if not ns:
+            self.notify("Enter a namespace", severity="warning")
             return
         item_id = self.query_one("#item-id-input", Input).value.strip()
         if not item_id:
@@ -392,6 +485,9 @@ class EntryScreen(Screen):
 
     @on(Button.Pressed, "#save-btn")
     def save_entry(self):
+        if not self.app.vault:
+            self.notify("No vault open", severity="error")
+            return
         raw = self.query_one("#entry-data", TextArea).text
         try:
             data = json.loads(raw)

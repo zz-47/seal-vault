@@ -10,10 +10,49 @@ from pathlib import Path
 
 import rich_click as click
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from aegis.vault_registry import _default_vault_dir
+
 console = Console()
+
+
+def _output_json(data: dict) -> None:
+    json.dump(data, sys.stdout, default=str)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def _show_vaults_on_startup() -> None:
+    """Default action when `seal` is run with no subcommand."""
+    from aegis.vault_registry import load_registry, _default_vault_dir
+
+    default_dir = _default_vault_dir()
+    if default_dir.is_dir():
+        from aegis.vault_registry import register_vault
+        known = {v["name"] for v in load_registry()}
+        for subdir in default_dir.iterdir():
+            if subdir.is_dir() and (subdir / "keys" / "manifest.enc").exists():
+                name = subdir.name
+                if name not in known:
+                    register_vault(name, str(subdir))
+
+    entries = load_registry()
+    if entries:
+        table = Table(title="Registered Vaults", border_style="cyan")
+        table.add_column("Name", style="bold")
+        table.add_column("Path")
+        table.add_column("Last Used", style="dim")
+        for v in entries:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(v.get("last_used", 0)))
+            exists = "[green]ok[/]" if Path(v["path"]).exists() else "[red]missing[/]"
+            table.add_row(v["name"], v["path"], f"{ts}  {exists}")
+        console.print(table)
+    else:
+        console.print("[dim]No vaults registered. Use 'seal init' to create one, or 'seal vaults add' to register an existing vault.[/]")
+    console.print("\n[dim]Run 'seal --help' for available commands.[/]")
 
 
 # ─── Shared helpers ──────────────────────────────────────────────────
@@ -25,11 +64,14 @@ def _handle_errors(func):
             return func(*args, **kwargs)
         except Exception as e:
             hint = getattr(e, "hint", "Check your command and try again.")
-            console.print(Panel(
-                f"[red bold]Error:[/] {e}\n[dim]{hint}[/]",
-                title="[red]seal[/]",
-                border_style="red",
-            ))
+            try:
+                console.print(Panel(
+                    f"[red bold]Error:[/] {e}\n[dim]{hint}[/]",
+                    title="[red]seal[/]",
+                    border_style="red",
+                ))
+            except (UnicodeEncodeError, OSError):
+                print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     return wrapper
 
@@ -40,13 +82,13 @@ def _get_vault(ctx, path=None, passphrase=None):
     from aegis.canary import CanaryManager
     if path:
         ctx.obj["path"] = Path(path)
-    vault_path = ctx.obj.get("path") or Path.cwd()
+    vault_path = ctx.obj.get("path") or _default_vault_dir()
     pw = passphrase or ctx.obj.get("passphrase")
     if not pw:
         pw = click.prompt("Passphrase", hide_input=True)
-    audit = AuditLog(vault_path)
-    canary = CanaryManager(vault_path)
     try:
+        audit = AuditLog(vault_path)
+        canary = CanaryManager(vault_path)
         return AegisVault(vault_path, pw, audit_log=audit, canary_manager=canary)
     except Exception as e:
         msg = str(e).lower()
@@ -58,13 +100,21 @@ def _get_vault(ctx, path=None, passphrase=None):
                 border_style="red",
             ))
             sys.exit(1)
+        if "hmac" in msg or "tamper" in msg or "integrity" in msg:
+            console.print(Panel(
+                f"[red]Vault tampered[/] at {vault_path}\n"
+                f"[dim]Canary manifest or audit log has been modified.[/]",
+                title="[red]seal[/]",
+                border_style="red",
+            ))
+            sys.exit(1)
         raise
 
 
 def _resolve_path(ctx, path=None):
     if path:
         ctx.obj["path"] = Path(path)
-    return ctx.obj.get("path") or Path.cwd()
+    return ctx.obj.get("path") or _default_vault_dir()
 
 
 def _check_passphrase_strength(passphrase: str) -> list[str]:
@@ -85,8 +135,8 @@ def _check_passphrase_strength(passphrase: str) -> list[str]:
 
 # ─── Root Group ──────────────────────────────────────────────────────
 
-@click.group()
-@click.version_option(package_name="aegis-vault")
+@click.group(invoke_without_command=True)
+@click.version_option(package_name="seal")
 @click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
 @click.option("--passphrase", "-p", envvar="SEAL_PASSPHRASE", help="Master passphrase.", hide_input=True)
 @click.pass_context
@@ -108,63 +158,112 @@ def cli(ctx, path, passphrase):
     ctx.ensure_object(dict)
     ctx.obj["path"] = Path(path) if path else None
     ctx.obj["passphrase"] = passphrase
+    if ctx.invoked_subcommand is None:
+        _show_vaults_on_startup()
 
 
 # ─── init ────────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--path", "-P", required=True, help="Directory to initialize as vault.", type=click.Path())
-@click.option("--passphrase", "-p", prompt=True, hide_input=True, confirmation_prompt=True, help="Master passphrase.")
+@click.option("--path", "-P", help="Directory to initialize as vault.", type=click.Path())
+@click.option("--passphrase", "-p", hide_input=True, envvar="SEAL_PASSPHRASE", help="Master passphrase.")
 @click.option("--cipher", type=click.Choice(["aes-gcm", "chacha20"]), default="aes-gcm", help="Encryption algorithm.")
+@click.option("--biometric", is_flag=True, help="Save passphrase for Windows Hello / biometric unlock.")
+@click.option("--json", "json_fmt", is_flag=True, help="Output as JSON.")
 @click.pass_context
 @_handle_errors
-def init(ctx, path, passphrase, cipher):
+def init(ctx, path, passphrase, cipher, biometric, json_fmt):
     """Create a new encrypted vault.
 
-    Namespaces organize your items into groups: personal, work, and archive.
+    Namespaces are free-form labels that organize your items
+    (e.g. personal, banking, work, recipes — anything you like).
 
     \b
     Examples:
       seal init --path ./my-vault
       seal init -P ./secrets -p "my-passphrase" --cipher chacha20
+      seal init -P ./my-vault -p "pass" --biometric
     """
     from aegis.crypt_storage import AegisVault
 
-    vault_dir = Path(path)
+    vault_dir = Path(path) if path else _default_vault_dir() / "my-vault"
     keys_dir = vault_dir / "keys"
     manifest_exists = (keys_dir / "manifest.enc").exists()
+
+    if not passphrase:
+        if json_fmt:
+            _output_json({"status":"error","operation":"init","error":"Passphrase required. Use --passphrase / -p."})
+            sys.exit(1)
+        elif sys.stdin.isatty():
+            import getpass
+            pw = getpass.getpass("Passphrase: ")
+            pw2 = getpass.getpass("Confirm passphrase: ")
+            if pw != pw2:
+                console.print("[red]Passphrases do not match.[/]")
+                sys.exit(1)
+            passphrase = pw
+        else:
+            console.print("[red]Passphrase required. Use --passphrase / -p when running non-interactively.[/]")
+            sys.exit(1)
 
     if manifest_exists:
         try:
             AegisVault(path, passphrase, cipher_suite=cipher)
-            console.print(Panel(
-                f"[yellow]Vault already exists at[/] {vault_dir.resolve()}\n"
-                f"[dim]Passphrase accepted. Use 'seal save' to store data.[/]",
-                title="[yellow]seal init[/]",
-                border_style="yellow",
-            ))
+            if json_fmt:
+                _output_json({"status":"ok","operation":"init","path":str(vault_dir.resolve()),"exists":True})
+            else:
+                console.print(Panel(
+                    f"[yellow]Vault already exists at[/] {vault_dir.resolve()}\n"
+                    f"[dim]Passphrase accepted. Use 'seal save' to store data.[/]",
+                    title="[yellow]seal init[/]",
+                    border_style="yellow",
+                ))
             return
         except Exception:
-            console.print(Panel(
-                f"[red]Vault already exists at[/] {vault_dir.resolve()}\n"
-                f"[dim]Passphrase does not match. Delete the vault first or use the correct passphrase.[/]",
-                title="[red]seal init[/]",
-                border_style="red",
-            ))
+            if json_fmt:
+                _output_json({"status":"error","operation":"init","path":str(vault_dir.resolve()),"error":"Passphrase does not match"})
+            else:
+                console.print(Panel(
+                    f"[red]Vault already exists at[/] {vault_dir.resolve()}\n"
+                    f"[dim]Passphrase does not match. Delete the vault first or use the correct passphrase.[/]",
+                    title="[red]seal init[/]",
+                    border_style="red",
+                ))
             sys.exit(1)
 
     warnings = _check_passphrase_strength(passphrase)
     if warnings:
-        console.print(f"[yellow]Weak passphrase:[/] {'; '.join(warnings)}")
+        if not json_fmt:
+            console.print(f"[yellow]Weak passphrase:[/] {'; '.join(warnings)}")
 
     vault = AegisVault(path, passphrase, cipher_suite=cipher)
-    console.print(Panel(
-        f"[green]Vault created at[/] {vault_dir.resolve()}\n"
-        f"[dim]Cipher: {cipher} | Namespaces: personal, work, archive[/]\n"
-        f"[dim]Items are organized into namespaces (like folders).[/]",
-        title="[green]seal init[/]",
-        border_style="green",
-    ))
+    if json_fmt:
+        _output_json({"status":"ok","operation":"init","path":str(vault_dir.resolve()),"cipher":cipher,"biometric":biometric})
+    else:
+        console.print(Panel(
+            f"[green]Vault created at[/] {vault_dir.resolve()}\n"
+            f"[dim]Cipher: {cipher} | Namespaces are free-form (use any name you like)[/]",
+            title="[green]seal init[/]",
+            border_style="green",
+        ))
+
+    if biometric:
+        try:
+            from aegis.biometric import BiometricUnlock
+            bio = BiometricUnlock()
+            bio.setup(passphrase)
+            console.print(Panel(
+                "[green]Passphrase saved for Windows Hello / biometric unlock.[/]",
+                title="[green]seal init[/]",
+                border_style="green",
+            ))
+        except Exception as e:
+            console.print(Panel(
+                f"[yellow]Biometric setup skipped:[/] {e}\n"
+                f"[dim]You can set it up later with: seal biometric enroll[/]",
+                title="[yellow]seal init[/]",
+                border_style="yellow",
+            ))
 
 
 # ─── save ────────────────────────────────────────────────────────────
@@ -172,7 +271,7 @@ def init(ctx, path, passphrase, cipher):
 @cli.command()
 @click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
 @click.option("--passphrase", "-p", envvar="SEAL_PASSPHRASE", help="Master passphrase.", hide_input=True)
-@click.option("--ns", "-n", required=True, type=click.Choice(["personal", "work", "archive"]), help="Namespace (like a folder).")
+@click.option("--ns", "-n", required=True, type=click.STRING, help="Namespace (like a folder).")
 @click.option("--id", "-i", "item_id", required=True, help="Item identifier.")
 @click.option("--data", "-d", help='JSON string or @filename. PowerShell users: use --kv or --file instead (PowerShell mangles double quotes in JSON).')
 @click.option("--file", "-f", "infile", type=click.File("r"), help="Read JSON from file.")
@@ -243,7 +342,7 @@ def save(ctx, path, passphrase, ns, item_id, data, infile, kv_pairs, interactive
 @cli.command()
 @click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
 @click.option("--passphrase", "-p", envvar="SEAL_PASSPHRASE", help="Master passphrase.", hide_input=True)
-@click.option("--ns", "-n", required=True, type=click.Choice(["personal", "work", "archive"]), help="Namespace.")
+@click.option("--ns", "-n", required=True, type=click.STRING, help="Namespace.")
 @click.option("--id", "-i", "item_id", required=True, help="Item identifier.")
 @click.option("--format", "-F", "fmt", type=click.Choice(["text", "json", "markdown"]), default="json", help="Output format.")
 @click.option("--clip", "-c", is_flag=True, help="Copy first value to clipboard (auto-clears after 30s).")
@@ -289,7 +388,8 @@ def load(ctx, path, passphrase, ns, item_id, fmt, clip):
         except Exception as e:
             console.print(f"[red]Clipboard error:[/] {e}")
     else:
-        console.print(f"\n[dim]Tip: use --clip to copy to clipboard instead of displaying.[/]")
+        if sys.stdout.isatty():
+            console.print(f"\n[dim]Tip: use --clip to copy to clipboard instead of displaying.[/]")
 
 
 # ─── list ────────────────────────────────────────────────────────────
@@ -297,7 +397,7 @@ def load(ctx, path, passphrase, ns, item_id, fmt, clip):
 @cli.command("list")
 @click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
 @click.option("--passphrase", "-p", envvar="SEAL_PASSPHRASE", help="Master passphrase.", hide_input=True)
-@click.option("--ns", "-n", type=click.Choice(["personal", "work", "archive"]), help="Namespace (omit to list all).")
+@click.option("--ns", "-n", type=click.STRING, help="Namespace (omit to list all).")
 @click.option("--format", "-F", "fmt", type=click.Choice(["text", "json"]), default="text")
 @click.option("--long", "-l", is_flag=True, help="Show details (creation date).")
 @click.pass_context
@@ -312,7 +412,18 @@ def list_items(ctx, path, passphrase, ns, fmt, long):
       seal list -P ./my-vault --format json
     """
     vault = _get_vault(ctx, path, passphrase)
-    namespaces = ["personal", "work", "archive"] if not ns else [ns]
+    if ns:
+        namespaces = [ns]
+    else:
+        vault_dir = Path(ctx.obj.get("path") or _default_vault_dir())
+        namespaces = sorted(
+            d.name for d in vault_dir.iterdir()
+            if d.is_dir() and not d.name.startswith(".") and d.name != "keys"
+        )
+
+    if not namespaces:
+        console.print("[dim](empty)[/]")
+        return
 
     if fmt == "json":
         all_items = {}
@@ -345,7 +456,7 @@ def list_items(ctx, path, passphrase, ns, fmt, long):
 @cli.command()
 @click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
 @click.option("--passphrase", "-p", envvar="SEAL_PASSPHRASE", help="Master passphrase.", hide_input=True)
-@click.option("--ns", "-n", required=True, type=click.Choice(["personal", "work", "archive"]))
+@click.option("--ns", "-n", required=True, type=click.STRING)
 @click.option("--id", "-i", "item_id", required=True)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
 @click.pass_context
@@ -411,6 +522,8 @@ def verify(ctx, path, passphrase, fmt):
 
     if fmt == "json":
         console.print_json(json.dumps(result))
+        if not chain_ok or (canary_result and canary_result.has_alerts):
+            sys.exit(1)
     else:
         if entry_count == 0 and not chain_ok:
             chain_str = "[yellow]NO LOG YET[/]"
@@ -446,6 +559,8 @@ def verify(ctx, path, passphrase, fmt):
             title="[bold]seal verify[/]",
             border_style="green" if chain_ok and not (canary_result and canary_result.has_alerts) else "red",
         ))
+        if not chain_ok or (canary_result and canary_result.has_alerts):
+            sys.exit(1)
 
 
 # ─── canary group ────────────────────────────────────────────────────
@@ -522,6 +637,7 @@ def canary_check(ctx, path, passphrase):
 
     if len(mgr._canaries) == 0:
         console.print("[yellow]No canaries deployed.[/] Run 'seal canary deploy' first.")
+        sys.exit(1)
     elif result.is_clean:
         console.print("[green]All canaries intact.[/]")
     else:
@@ -538,6 +654,7 @@ def canary_check(ctx, path, passphrase):
             table.add_row(canary_file.name, "[red]MISSING[/] — file was deleted")
         console.print(table)
         console.print(f"\n[dim]Decoy files were tampered with or missing. If you did not do this yourself, your files may be at risk.[/]")
+        sys.exit(1)
 
 
 @canary.command()
@@ -576,7 +693,7 @@ def audit():
 
 @audit.command("show")
 @click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
-@click.option("--ns", "-n", type=click.Choice(["personal", "work", "archive"]), help="Filter by namespace.")
+@click.option("--ns", "-n", type=click.STRING, help="Filter by namespace.")
 @click.option("--op", "-o", type=click.Choice(["save", "load", "delete"]), help="Filter by operation.")
 @click.option("--since", "-s", type=float, help="Show entries after this Unix timestamp.")
 @click.option("--last", "-l", type=int, default=0, help="Show only the last N entries.")
@@ -636,7 +753,7 @@ def audit_show(ctx, path, ns, op, since, last):
 @click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
 @click.option("--format", "-F", "fmt", type=click.Choice(["json", "markdown"]), default="json")
 @click.option("--output", "-o", type=click.Path(), help="Write to file instead of stdout.")
-@click.option("--ns", "-n", type=click.Choice(["personal", "work", "archive"]), help="Filter by namespace.")
+@click.option("--ns", "-n", type=click.STRING, help="Filter by namespace.")
 @click.option("--op", type=click.Choice(["save", "load", "delete"]), help="Filter by operation.")
 @click.pass_context
 @_handle_errors
@@ -796,7 +913,7 @@ def share():
 @click.option("--passphrase", "-p", envvar="SEAL_PASSPHRASE", help="Master passphrase.", hide_input=True)
 @click.option("--user", "-u", required=True, help="Recipient public key (hex).")
 @click.option("--dek", "-d", help="Encryption key to share (hex). Provide either --dek OR --ns + --id.")
-@click.option("--ns", "-n", type=click.Choice(["personal", "work", "archive"]), help="Namespace of item to share.")
+@click.option("--ns", "-n", type=click.STRING, help="Namespace of item to share.")
 @click.option("--id", "-i", "item_id", help="Item ID to share.")
 @click.pass_context
 @_handle_errors
@@ -970,6 +1087,115 @@ def biometric_remove(ctx, vault_id):
     console.print(f"[yellow]Passphrase removed for vault '{vault_id}'.[/]")
 
 
+# ─── vaults group ────────────────────────────────────────────────────
+
+@cli.group()
+def vaults():
+    """Manage multiple vaults.
+
+    Register, list, and switch between vaults. Stored in
+    your local AppData directory.
+    """
+    pass
+
+
+@vaults.command("list")
+@click.option("--json", "json_fmt", is_flag=True, help="Output as JSON.")
+def vaults_list(json_fmt):
+    """List registered vaults.
+
+    \b
+    Examples:
+      seal vaults list
+      seal vaults list --json
+    """
+    from aegis.vault_registry import load_registry, _default_vault_dir, register_vault
+
+    default_dir = _default_vault_dir()
+    if default_dir.is_dir():
+        known = {v["name"] for v in load_registry()}
+        for subdir in default_dir.iterdir():
+            if subdir.is_dir() and (subdir / "keys" / "manifest.enc").exists():
+                name = subdir.name
+                if name not in known:
+                    register_vault(name, str(subdir))
+
+    entries = load_registry()
+    if not entries:
+        if json_fmt:
+            _output_json({"status":"ok","vaults":[]})
+        else:
+            console.print("[dim]No vaults registered.[/] Use 'seal init' to create one, or 'seal vaults add' to register an existing vault.")
+        return
+
+    if json_fmt:
+        _output_json({
+            "status":"ok",
+            "vaults":[{
+                "name":v["name"],
+                "path":v["path"],
+                "last_used":v.get("last_used",0),
+                "exists":Path(v["path"]).exists()
+            } for v in entries]
+        })
+    else:
+        table = Table(title="Registered Vaults", border_style="cyan")
+        table.add_column("Name", style="bold")
+        table.add_column("Path")
+        table.add_column("Last Used", style="dim")
+        for v in entries:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(v.get("last_used", 0)))
+            exists = "[green]ok[/]" if Path(v["path"]).exists() else "[red]missing[/]"
+            table.add_row(v["name"], v["path"], f"{ts}  {exists}")
+        console.print(table)
+
+
+@vaults.command("add")
+@click.option("--name", "-n", required=True, help="Vault name (e.g. 'work', 'personal').")
+@click.option("--path", "-P", required=True, help="Path to vault directory.", type=click.Path())
+@_handle_errors
+def vaults_add(name, path):
+    """Register a vault by name.
+
+    \b
+    Examples:
+      seal vaults add -n work -P ./my-work-vault
+      seal vaults add -n personal -P C:\\Users\\me\\vaults\\personal
+    """
+    from aegis.vault_registry import register_vault
+
+    vault_dir = Path(path)
+    if not (vault_dir / "keys" / "manifest.enc").exists():
+        console.print(Panel(
+            f"[yellow]No vault found at[/] {vault_dir.resolve()}\n"
+            f"[dim]Run 'seal init -P {path}' first, or point to an existing vault.[/]",
+            title="[yellow]seal vaults add[/]",
+            border_style="yellow",
+        ))
+        return
+
+    register_vault(name, path)
+    console.print(f"[green]Registered[/] vault '{name}' at {vault_dir.resolve()}")
+
+
+@vaults.command("remove")
+@click.option("--name", "-n", required=True, help="Vault name to remove.")
+@_handle_errors
+def vaults_remove(name):
+    """Remove a vault from the registry.
+
+    \b
+    Examples:
+      seal vaults remove -n work
+    """
+    from aegis.vault_registry import unregister_vault
+
+    if unregister_vault(name):
+        console.print(f"[yellow]Removed[/] vault '{name}' from registry.")
+    else:
+        console.print(f"[yellow]Vault '{name}' not found in registry.[/]")
+
+
 # ─── keygen ──────────────────────────────────────────────────────────
 
 @cli.command()
@@ -984,9 +1210,10 @@ def keygen():
     Example:
       seal keygen
     """
+    import tempfile
     from aegis.sharing import ShareManager
 
-    sm = ShareManager(".")
+    sm = ShareManager(tempfile.mkdtemp())
     user_id, pub_hex, priv_hex = sm.generate_keypair()
     console.print(Panel(
         f"[green]Keypair generated.[/]\n\n"
@@ -1003,7 +1230,7 @@ def keygen():
 # ─── generate ────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--length", "-l", default=24, help="Password length.", type=int)
+@click.option("--length", "-l", default=24, help="Password length (1-9999).", type=click.IntRange(1, 9999))
 @click.option("--no-symbols", is_flag=True, help="Exclude special characters.")
 @click.option("--count", "-n", default=1, help="Number of passwords to generate.")
 @click.option("--clip", "-c", is_flag=True, help="Copy to clipboard (auto-clears after 30s).")
@@ -1044,21 +1271,145 @@ def generate(length, no_symbols, count, clip):
             console.print("[yellow]pyperclip not installed. Install with: pip install pyperclip[/]")
     else:
         for pw in passwords:
-            console.print(f"  {pw}")
+            console.print(f"  {escape(pw)}")
+
+
+# ─── encrypt / decrypt ───────────────────────────────────────────────
+
+@cli.command()
+@click.option("--input", "-i", "infile", required=True, help="File or folder to encrypt.", type=click.Path())
+@click.option("--output", "-o", "outfile", required=True, help="Output encrypted file path.")
+@click.option("--passphrase", "-p", hide_input=True, envvar="SEAL_PASSPHRASE", help="Encryption passphrase.")
+@click.option("--json", "json_fmt", is_flag=True, help="Output as JSON.")
+@_handle_errors
+def encrypt(infile, outfile, passphrase, json_fmt):
+    """Encrypt a file or folder.
+
+    Creates a standalone .enc file that can be decrypted with
+    'seal decrypt' using the same passphrase. No vault required.
+
+    \b
+    Examples:
+      seal encrypt -i secrets.txt -o secrets.txt.enc
+      seal encrypt -i ./my-folder -o ./my-folder.enc
+    """
+    if not passphrase:
+        if json_fmt:
+            _output_json({"status":"error","operation":"encrypt","error":"Passphrase required. Use SEAL_PASSPHRASE env var or --passphrase."})
+            sys.exit(1)
+        elif sys.stdin.isatty():
+            import getpass
+            pw = getpass.getpass("Encryption passphrase: ")
+            pw2 = getpass.getpass("Confirm passphrase: ")
+            if pw != pw2:
+                console.print("[red]Passphrases do not match.[/]")
+                sys.exit(1)
+            passphrase = pw
+        else:
+            console.print("[red]Passphrase required. Use SEAL_PASSPHRASE env var or --passphrase.[/]")
+            sys.exit(1)
+
+    from aegis.file_crypto import encrypt_file, encrypt_folder
+
+    src = Path(infile)
+    dst = Path(outfile).resolve()
+    if src.is_dir():
+        encrypt_folder(src, outfile, passphrase)
+        if json_fmt:
+            _output_json({"status":"ok","operation":"encrypt-folder","input":str(src.resolve()),"output":str(dst)})
+        else:
+            console.print(f"[green]Encrypted folder[/] {src} -> {outfile}")
+            console.print(f"[dim]Saved to:[/] {dst}")
+    else:
+        encrypt_file(src, outfile, passphrase)
+        if json_fmt:
+            _output_json({"status":"ok","operation":"encrypt","input":str(src.resolve()),"output":str(dst)})
+        else:
+            console.print(f"[green]Encrypted file[/] {src} -> {outfile}")
+            console.print(f"[dim]Saved to:[/] {dst}")
+
+
+@cli.command()
+@click.option("--input", "-i", "infile", required=True, help="Encrypted file to decrypt.", type=click.Path())
+@click.option("--output", "-o", "outfile", required=True, help="Output path (file or directory).")
+@click.option("--passphrase", "-p", hide_input=True, envvar="SEAL_PASSPHRASE", help="Decryption passphrase.")
+@click.option("--json", "json_fmt", is_flag=True, help="Output as JSON.")
+@_handle_errors
+def decrypt(infile, outfile, passphrase, json_fmt):
+    """Decrypt a file or folder.
+
+    Decrypts a file created by 'seal encrypt'. For folders,
+    extracts the archive to the output directory.
+
+    \b
+    Examples:
+      seal decrypt -i secrets.txt.enc -o secrets.txt
+      seal decrypt -i my-folder.enc -o ./restored-folder
+    """
+    if not passphrase:
+        if json_fmt:
+            _output_json({"status":"error","operation":"decrypt","error":"Passphrase required. Use SEAL_PASSPHRASE env var or --passphrase."})
+            sys.exit(1)
+        elif sys.stdin.isatty():
+            import getpass
+            passphrase = getpass.getpass("Decryption passphrase: ")
+        else:
+            console.print("[red]Passphrase required. Use SEAL_PASSPHRASE env var or --passphrase.[/]")
+            sys.exit(1)
+
+    from aegis.file_crypto import decrypt_file, decrypt_archive
+
+    src = Path(infile)
+    dst = Path(outfile).resolve()
+    if not src.exists():
+        if json_fmt:
+            _output_json({"status":"error","operation":"decrypt","error":f"File not found: {src}"})
+        else:
+            console.print(f"[red]File not found:[/] {src}")
+        sys.exit(1)
+
+    if dst.exists():
+        if json_fmt:
+            _output_json({"status":"error","operation":"decrypt","error":f"Output path already exists: {dst}"})
+        else:
+            console.print(f"[red]Output path already exists:[/] {dst}\n[dim]Remove it first or choose a different output path.[/]")
+        sys.exit(1)
+
+    try:
+        decrypt_file(src, outfile, passphrase)
+        if json_fmt:
+            _output_json({"status":"ok","operation":"decrypt","input":str(src.resolve()),"output":str(dst)})
+        else:
+            console.print(f"[green]Decrypted[/] {src} -> {outfile}")
+    except Exception as e1:
+        try:
+            decrypt_archive(src, outfile, passphrase)
+            if json_fmt:
+                _output_json({"status":"ok","operation":"decrypt-archive","input":str(src.resolve()),"output":str(dst)})
+            else:
+                console.print(f"[green]Decrypted archive[/] {src} -> {outfile}/")
+        except Exception as e2:
+            if json_fmt:
+                _output_json({"status":"error","operation":"decrypt","error":f"file: {e1}, archive: {e2}"})
+            else:
+                console.print(f"[red]Decryption failed (file: {e1}, archive: {e2})[/]")
+            sys.exit(1)
 
 
 # ─── doctor ──────────────────────────────────────────────────────────
 
 @cli.command()
 @click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
+@click.option("--json", "json_fmt", is_flag=True, help="Output as JSON.")
 @click.pass_context
 @_handle_errors
-def doctor(ctx, path):
+def doctor(ctx, path, json_fmt):
     """Check vault health and configuration.
 
     \b
     Example:
       seal doctor -P ./my-vault
+      seal doctor -P ./my-vault --json
     """
     from aegis.audit import AuditLog
     from aegis.canary import CanaryManager
@@ -1071,10 +1422,6 @@ def doctor(ctx, path):
         checks.append(("Vault directory exists", True, str(vault_path)))
     else:
         checks.append(("Vault directory exists", False, f"Not found: {vault_path}"))
-        for status, ok, msg in checks:
-            icon = "[green]PASS[/]" if ok else "[red]FAIL[/]"
-            console.print(f"  {icon}  {status}: {msg}")
-        return
 
     # 2. Keys directory
     keys_dir = vault_path / "keys"
@@ -1110,20 +1457,26 @@ def doctor(ctx, path):
     except Exception as e:
         checks.append(("Canary files", False, f"Check failed: {e}"))
 
-    # Display
     all_pass = all(ok for _, ok, _ in checks)
-    border = "green" if all_pass else "red"
-    title = "[green]All checks passed[/]" if all_pass else "[yellow]Some checks failed[/]"
 
-    table = Table(title="seal doctor", border_style=border)
-    table.add_column("Status", justify="center")
-    table.add_column("Check", style="bold")
-    table.add_column("Details", style="dim")
-    for check_name, ok, detail in checks:
-        icon = "[green]PASS[/]" if ok else "[red]FAIL[/]"
-        table.add_row(icon, check_name, detail)
-    console.print(table)
-    console.print(f"\n  {title}")
+    if json_fmt:
+        _output_json({
+            "status":"ok" if all_pass else "warning",
+            "checks":[{"name":n,"ok":ok,"detail":d} for n,ok,d in checks],
+            "all_pass":all_pass
+        })
+    else:
+        border = "green" if all_pass else "red"
+        title = "[green]All checks passed[/]" if all_pass else "[yellow]Some checks failed[/]"
+        table = Table(title="seal doctor", border_style=border)
+        table.add_column("Status", justify="center")
+        table.add_column("Check", style="bold")
+        table.add_column("Details", style="dim")
+        for check_name, ok, detail in checks:
+            icon = "[green]PASS[/]" if ok else "[red]FAIL[/]"
+            table.add_row(icon, check_name, detail)
+        console.print(table)
+        console.print(f"\n  {title}")
 
 
 # ─── tui ─────────────────────────────────────────────────────────────
@@ -1141,9 +1494,77 @@ def tui(ctx, path):
     """
     from aegis.tui.app import SealApp
 
-    vault_path = _resolve_path(ctx, path)
+    vault_path = Path(path) if path else None
     app = SealApp(vault_path=vault_path)
-    app.run()
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        pass
+
+
+# ─── ask (routing agent) ─────────────────────────────────────────────
+
+@cli.command()
+@click.argument("text")
+@click.option("--path", "-P", envvar="SEAL_VAULT", help="Vault directory path.", type=click.Path())
+@click.option("--passphrase", "-p", envvar="SEAL_PASSPHRASE", help="Master passphrase.", hide_input=True)
+@click.option("--execute", "-x", is_flag=True, help="Execute the routed command (requires passphrase).")
+@click.pass_context
+@_handle_errors
+def ask(ctx, text, path, passphrase, execute):
+    """Route a natural language command to Seal.
+
+    \b
+    Examples:
+      seal ask "save my gmail password"
+      seal ask "list all passwords"
+      seal ask "generate a 32 character password"
+      seal ask "check vault health"
+      seal ask "save my wifi password" -x -P ./my-vault -p "pass"
+    """
+    from aegis.agent import SealAgent
+
+    agent = SealAgent()
+    cmd = agent.route(text)
+
+    table = Table(border_style="cyan")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Command", cmd.command)
+    if cmd.args:
+        for k, v in cmd.args.items():
+            table.add_row(f"  {k}", str(v))
+    table.add_row("Confidence", f"{cmd.confidence:.0%}")
+    table.add_row("CLI", " ".join(cmd.to_args_list()))
+    console.print(table)
+
+    if execute:
+        if cmd.command == "unknown":
+            console.print("[yellow]Cannot execute — command not recognized.[/]")
+            return
+        if cmd.command == "help":
+            console.print("[dim]Try: seal --help[/]")
+            return
+
+        args_list = cmd.to_args_list()
+        if path:
+            args_list.extend(["-P", str(path)])
+        if passphrase:
+            args_list.extend(["-p", passphrase])
+
+        import subprocess
+        result = subprocess.run(
+            ["seal"] + args_list,
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            console.print(Panel(
+                f"[red]Command failed:[/]\n{result.stderr or result.stdout}",
+                title=f"[red]seal {cmd.command}[/]",
+                border_style="red",
+            ))
+        else:
+            console.print(result.stdout or "[dim]Done.[/]")
 
 
 # ─── version ─────────────────────────────────────────────────────────

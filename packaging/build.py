@@ -43,8 +43,6 @@ def clean():
 
 def build(onefile: bool = False):
     tag = _platform_tag()
-    out_name = f"seal-{tag}"
-    out_dir = DIST_DIR / out_name
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -66,15 +64,14 @@ def build(onefile: bool = False):
         "aegis.cipher", "aegis.key_manager", "aegis.crypt_storage",
         "aegis.audit", "aegis.canary", "aegis.report",
         "aegis.biometric", "aegis.sharing", "aegis._errors",
+        "aegis.file_crypto", "aegis.vault_registry", "aegis.agent",
         "aegis.tui", "aegis.tui.app",
-        "aegis.tui.screens", "aegis.tui.screens.login",
-        "aegis.tui.screens.vault", "aegis.tui.screens.entry",
-        "aegis.tui.screens.generator",
-        "aegis.tui.widgets", "aegis.tui.widgets.strength",
-        "aegis.gui", "aegis.gui.app",
-        "tkinter", "tkinter.ttk", "tkinter.messagebox", "tkinter.simpledialog",
-        "ttkbootstrap", "ttkbootstrap.constants", "ttkbootstrap.dialogs",
-        "ttkbootstrap.scrolled",
+        "aegis.tui.screens",
+        "aegis.tui.screens.login", "aegis.tui.screens.vault",
+        "aegis.tui.screens.picker", "aegis.tui.screens.generator",
+        "aegis.tui.screens.canary", "aegis.tui.screens.report",
+        "aegis.tui.screens.file_crypto", "aegis.tui.screens.file_browser",
+        "aegis.tui.screens.help_screen", "aegis.tui.screens.create_vault",
     ]
     for h in hidden:
         cmd.extend(["--hidden-import", h])
@@ -83,7 +80,8 @@ def build(onefile: bool = False):
     cmd.extend(["--collect-all", "textual"])
 
     # exclude heavy unused packages
-    for ex in ["matplotlib", "numpy", "pandas", "scipy", "PIL", "pytest"]:
+    for ex in ["matplotlib", "numpy", "pandas", "scipy", "PIL", "pytest",
+               "tkinter", "ttkbootstrap", "transformers", "torch"]:
         cmd.extend(["--exclude-module", ex])
 
     # entry point

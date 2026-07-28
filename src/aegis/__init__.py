@@ -1,6 +1,6 @@
 """Seal — Zero-cloud encrypted file storage with tamper-evident audit."""
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 from aegis.crypt_storage import AegisVault
 from aegis.audit import AuditLog

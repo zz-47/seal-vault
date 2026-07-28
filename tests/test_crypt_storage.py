@@ -41,7 +41,9 @@ class TestAegisVault:
 
     def test_invalid_namespace(self, vault):
         with pytest.raises(LocalStorageError):
-            vault.save("invalid", "doc_01", {})
+            vault.save("", "doc_01", {})
+        with pytest.raises(LocalStorageError):
+            vault.save("bad/name", "doc_01", {})
 
     def test_load_nonexistent(self, vault):
         with pytest.raises(ItemNotFoundError):

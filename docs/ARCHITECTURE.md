@@ -1,29 +1,38 @@
 # Architecture: Seal (Aegis Vault)
 
-## 12-Module System
+## 15-Module System
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                          cli.py                                 │
-│                    Click CLI interface                           │
-├─────────────────┬───────────────────┬───────────────────────────┤
-│  crypt_storage  │      audit        │        canary             │
-│  AegisVault     │  SHA-256 chain    │  Decoy detection          │
-│  save/load/del  │  append-only log  │  entropy monitoring       │
-├─────────────────┼───────────────────┼───────────────────────────┤
-│  sharing        │      report       │       biometric           │
-│  X25519 stanzas │  SOC2/HIPAA/      │  keyring + fingerprint    │
-│  multi-user     │  GDPR/ISO27001    │  Windows Hello            │
-├─────────────────┴───────────────────┴───────────────────────────┤
-│                      key_manager.py                             │
-│            PBKDF2 (600K) → DEK wrap/unwrap → manifest           │
-├─────────────────────────────────────────────────────────────────┤
-│                       cipher.py                                 │
-│            AES-256-GCM / ChaCha20-Poly1305 AEAD                 │
-├─────────────────────────────────────────────────────────────────┤
-│                      _errors.py                                 │
-│            9 custom exception classes                           │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                            cli.py                                   │
+│                  Click + Rich CLI (28 commands)                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                        tui/app.py                                   │
+│              Textual TUI (8 screens, vault picker)                  │
+├─────────────┬─────────────┬─────────────┬───────────────────────────┤
+│  crypt_     │    audit    │   canary    │         sharing           │
+│  storage.py │    .py      │    .py      │           .py             │
+│  AegisVault │  SHA-256    │  Decoy      │  X25519 stanzas           │
+│  save/load  │  chain log  │  detection  │  multi-user DEK           │
+├─────────────┼─────────────┼─────────────┼───────────────────────────┤
+│  file_      │   report    │  biometric  │    vault_registry.py      │
+│  crypto.py  │    .py      │    .py      │  ~/.seal/vaults.json      │
+│  standalone │  SOC2/      │  Windows    │  central vault index      │
+│  encrypt    │  HIPAA/     │  Hello +    │                           │
+│             │  GDPR/ISO   │  keyring    │                           │
+├─────────────┴─────────────┴─────────────┴───────────────────────────┤
+│                          agent.py                                   │
+│             SmolLM2-135M-Instruct + rule-based fallback             │
+├─────────────────────────────────────────────────────────────────────┤
+│                       key_manager.py                                │
+│           PBKDF2 (600K) → DEK wrap/unwrap → manifest                │
+├─────────────────────────────────────────────────────────────────────┤
+│                         cipher.py                                   │
+│            AES-256-GCM / ChaCha20-Poly1305 AEAD                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                        _errors.py                                   │
+│               9 custom exception classes                            │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Layer Stack
@@ -57,21 +66,22 @@
 ## Data Flow: save()
 
 ```
-1. Validate namespace ∈ {personal, work, archive}
-2. Check if item_id already has a DEK
+1. Validate namespace (non-empty, no / or \ characters)
+2. Validate item_id (no /, \, or .. sequences)
+3. Check if item_id already has a DEK
    ├─ YES → reuse existing DEK
    └─ NO  → generate new DEK → wrap under Master Key → add to manifest
-3. JSON-serialize the data dict
-4. Construct AAD = b"aegis_ns:" + b"namespace:item_id"
-5. Encrypt(serialized_data, dek, aad) → blob
-6. Atomic write: .tmp → flush → fsync → os.replace
-7. If manifest changed → save manifest (same atomic pattern)
+4. JSON-serialize the data dict
+5. Construct AAD = b"aegis_ns:" + b"namespace:item_id"
+6. Encrypt(serialized_data, dek, aad) → blob
+7. Atomic write: .tmp → flush → fsync → os.replace
+8. If manifest changed → save manifest (same atomic pattern)
 ```
 
 ## Data Flow: load()
 
 ```
-1. Validate namespace
+1. Validate namespace and item_id
 2. Read .enc file from disk
 3. Look up DEK via KeyManager (cache → manifest → unwrap)
 4. Construct AAD = b"aegis_ns:" + b"namespace:item_id"
@@ -84,14 +94,22 @@
 ```
 vault/
 ├── keys/
-│   └── manifest.enc          # salt(16) || encrypted(JSON{items: {id: {dek, ns, created}}})
-├── personal/
+│   ├── manifest.enc          # salt(16) || encrypted(JSON{items: {id: {dek, ns, created}}})
+│   ├── audit.log             # NDJSON: {seq, ts, op, namespace, item_id, prev_hash, hash}
+│   └── stanzas.json          # X25519 wrapped DEKs for shared users
+├── personal/                 # any namespace name
 │   ├── doc1.enc              # nonce(12) || ciphertext || tag(16)
 │   └── doc2.enc
+├── banking/
+│   └── chase.enc
 ├── work/
-│   └── report.enc
-└── archive/
-    └── old_data.enc
+│   └── api-config.enc
+└── .canaries/
+    ├── canaries.json         # {name, path, original_hash, original_entropy}
+    ├── canaries.json.hmac    # HMAC-SHA256 signature
+    ├── passwords.xlsx        # Decoy file (512 bytes random)
+    ├── financials.pdf        # Decoy file
+    └── wallet.dat            # Decoy file
 ```
 
 ## Blob Format
@@ -112,6 +130,15 @@ vault/
 └──────┴─────────────────────────────────────┘
 ```
 
+## File Encryption Format (standalone)
+
+```
+┌──────┬──────────┬────────────────────┬──────────┐
+│ SEAL │ salt(32) │ nonce(12)          │ ct || tag│
+│magic │          │                    │          │
+└──────┴──────────┴────────────────────┴──────────┘
+```
+
 ## AAD Domain Separation
 
 | Context | AAD Value |
@@ -126,45 +153,46 @@ Different AAD values for different purposes prevent ciphertext relocation attack
 
 | Module | LOC | Role |
 |--------|-----|------|
-| `cipher.py` | 134 | AEAD encrypt/decrypt (AES-GCM, ChaCha20) |
-| `key_manager.py` | 200 | PBKDF2 derivation, DEK wrap/unwrap, manifest I/O |
-| `crypt_storage.py` | 166 | Vault facade: save/load/delete/list, atomic writes |
-| `_errors.py` | 78 | 9 custom exception classes |
-| `audit.py` | 133 | SHA-256 chained append-only audit log |
-| `canary.py` | 180 | Ransomware canary decoy detection |
-| `sharing.py` | 154 | X25519 key exchange for multi-user access |
-| `biometric.py` | 113 | Windows Hello fingerprint + keyring integration |
-| `report.py` | 236 | SOC 2 / HIPAA / GDPR / ISO 27001 report generation |
-| `cli.py` | 2 | Click CLI interface (placeholder) |
-| **Total** | **1,294** | |
+| `cipher.py` | 104 | AEAD encrypt/decrypt (AES-GCM, ChaCha20) |
+| `key_manager.py` | 162 | PBKDF2 derivation, DEK wrap/unwrap, manifest I/O |
+| `crypt_storage.py` | 168 | Vault facade: save/load/delete/list, atomic writes |
+| `_errors.py` | 58 | 9 custom exception classes |
+| `audit.py` | 121 | SHA-256 chained append-only audit log |
+| `canary.py` | 210 | Ransomware canary decoy detection + HMAC manifest |
+| `sharing.py` | 137 | X25519 key exchange for multi-user access |
+| `biometric.py` | 146 | Windows Hello fingerprint + keyring integration |
+| `report.py` | 225 | SOC 2 / HIPAA / GDPR / ISO 27001 report generation |
+| `file_crypto.py` | 98 | Standalone file/folder encryption (no vault required) |
+| `vault_registry.py` | 66 | Central vault registry (`%LOCALAPPDATA%/Seal/vaults.json`) |
+| `agent.py` | 246 | SmolLM2-135M-Instruct + rule-based NL routing |
+| `cli.py` | 1,344 | Click + Rich CLI (28 commands) |
+| `tui/app.py` | 154 | Textual app shell, screen routing |
+| `tui/screens/*.py` | 1,609 | 10 screens |
+| **Total** | **4,848** | |
 
-## On-Disk Layout (Full)
+## TUI Screens
 
-```
-vault/
-├── keys/
-│   ├── manifest.enc          # salt(16) || encrypted(JSON{items: {id: {dek, ns, created}}})
-│   ├── audit.log             # NDJSON: {seq, ts, op, namespace, item_id, prev_hash, hash}
-│   └── stanzas.json          # X25519 wrapped DEKs for shared users
-├── personal/
-│   ├── doc1.enc              # nonce(12) || ciphertext || tag(16)
-│   └── doc2.enc
-├── work/
-│   └── report.enc
-├── archive/
-│   └── old_data.enc
-└── .canaries/
-    ├── canaries.json         # {name, path, original_hash, original_entropy}
-    ├── passwords.xlsx        # Decoy file (512 bytes random)
-    ├── financials.pdf        # Decoy file
-    └── wallet.dat            # Decoy file
-```
+| Screen | File | Role |
+|--------|------|------|
+| VaultPickerScreen | `picker.py` | Registry-based vault selection |
+| LoginScreen | `login.py` | Passphrase entry + biometric |
+| VaultScreen | `vault.py` | Browse entries, search, edit, delete |
+| NewItemScreen | `vault.py` | Create entry with free-form namespace |
+| EntryScreen | `vault.py` | Edit raw JSON of existing entry |
+| GeneratorScreen | `generator.py` | Password generator with strength meter |
+| CanaryScreen | `canary.py` | Deploy/check/remove canary files |
+| ReportScreen | `report.py` | Compliance report generation |
+| FileCryptoScreen | `file_crypto.py` | Standalone file encrypt/decrypt |
+| FileBrowserScreen | `file_browser.py` | File/directory picker for encrypt paths |
+| HelpScreen | `help_screen.py` | Keyboard shortcuts + CLI examples |
+| CreateVaultScreen | `create_vault.py` | In-app vault creation |
 
 ## Test Suite
 
-108 tests across 10 files. See [tests/TEST_DOCUMENTATION.md](../tests/TEST_DOCUMENTATION.md) for the full indexed test catalog.
+309 tests — 252 unit (16 files) + 57 production integration. See [TEST_DOCUMENTATION.md](TEST_DOCUMENTATION.md) for the full indexed test catalog.
 
 ```bash
-python -m pytest tests/ -v        # Run all 108 tests
+python -m pytest tests/ -v                # Run all 252 unit tests
+python tests/run_production.py            # Run 57 production tests
 python -m pytest tests/test_cipher.py -v  # Run one module
 ```

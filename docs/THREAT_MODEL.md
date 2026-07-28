@@ -51,6 +51,24 @@
 
 **Argument:** Before `unlink()`, the file is overwritten with `os.urandom(length)` bytes. The overwritten data is indistinguishable from random. **Limitation:** This does not protect against journaling filesystems that retain old blocks, or SSD wear-leveling that may remap blocks.
 
+### 2.6 Path Traversal Prevention
+
+**Claim:** Malicious `item_id` values containing `/`, `\`, or `..` sequences cannot escape the namespace directory.
+
+**Argument:** `item_id` is validated before path construction. Values containing `/`, `\`, or `..` raise `LocalStorageError` immediately. This prevents directory traversal attacks where an attacker could read or write files outside the intended namespace.
+
+### 2.7 Timing-Attack Resistance (Biometric)
+
+**Claim:** The biometric fallback (passphrase stored in keyring) is not vulnerable to timing attacks.
+
+**Argument:** Passphrase comparison uses `hmac.compare_digest()` which performs constant-time comparison. The previous implementation used `pw == stored` which leaks timing information about matching prefix length.
+
+### 2.8 Canary Manifest Integrity
+
+**Claim:** The canary manifest (`canaries.json`) cannot be tampered with without detection.
+
+**Argument:** The manifest is protected by an HMAC-SHA256 signature stored in `canaries.json.hmac`. The HMAC key is derived from the vault path via SHA-256. Any modification to the manifest invalidates the HMAC signature, and `hmac.compare_digest()` ensures constant-time comparison.
+
 ## 3. What This Model Does NOT Cover
 
 | Threat | Status |
@@ -62,6 +80,7 @@
 | SSD wear-leveling remapping | Not mitigated |
 | Passphrase brute-force with GPU cluster | Mitigated by PBKDF2 cost |
 | Denial of service | Not addressed |
+| LLM hallucination in agent routing | Mitigated by rule-based fallback |
 
 ## 4. Trust Assumptions
 
@@ -69,6 +88,8 @@
 2. The `cryptography` library's AES-GCM/ChaCha20 implementations are correct
 3. The OS `fsync()` call actually flushes to persistent storage
 4. The user chooses a passphrase with sufficient entropy
+5. The system keyring (Windows Hello) is not compromised
+6. The HMAC key derivation is collision-resistant
 
 ## 5. Threats Covered by Test Suite
 
@@ -88,5 +109,9 @@
 | Nonce reuse | C-12 | `test_multiple_encryptions_unique_nonces` |
 | Wrong AAD context | C-06 | `test_wrong_aad_fails` |
 | Audit chain tamper | AL-03, RC-16 | `test_audit_log_chain_break` |
+| Path traversal in item_id | RC-17 | `test_path_traversal_rejected` |
+| Timing attack on biometric | BIO-01 | `test_biometric_comparison_constant_time` |
+| Canary manifest tamper | CA-08 | `test_canary_manifest_hmac` |
+| Free-form namespace validation | VS-11 | `test_invalid_namespace_rejected` |
 
-See [tests/TEST_DOCUMENTATION.md](../tests/TEST_DOCUMENTATION.md) for the full 108-test catalog.
+See [TEST_DOCUMENTATION.md](TEST_DOCUMENTATION.md) for the full 309-test catalog.

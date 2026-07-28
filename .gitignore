@@ -24,6 +24,14 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Build outputs
+packaging/dist/
+packaging/build/
+
 # Aegis Vault runtime
 *.tmp
 *.enc
+*.seal
+
+# Test artifacts
+.pytest_cache/

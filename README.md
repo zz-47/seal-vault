@@ -30,6 +30,10 @@ Every deployment is different. Seal will be tailored to fit your specific infras
 - **Multi-user key exchange** — X25519 stanzas for shared vaults
 - **Atomic writes** — Crash-safe .tmp → fsync → os.replace pattern
 - **Secure deletion** — Random overwrite before unlink
+- **File encryption** — Standalone encrypt/decrypt for files and folders
+- **Vault registry** — Manage multiple vaults from `%LOCALAPPDATA%\Seal\vaults.json`
+- **Natural language agent** — Route NL commands via SmolLM2-135M-Instruct
+- **Free-form namespaces** — Any label you like (not restricted to predefined names)
 
 ## Why Seal Exists
 
@@ -44,6 +48,9 @@ Seal was built as a personal effort to solve a few problems I kept running into 
 | Multi-user key exchange | X25519 stanzas | Token / ACL system | - | - | X25519 stanzas | - |
 | Zero cloud / zero server | Yes | Self-hosted option | Yes | Yes | Yes | Depends on backend |
 | Envelope encryption (per-file DEK) | Yes | Transit engine | - | Yes | - | - |
+| File/folder encryption | Standalone .enc | - | Full-disk | Cloud sync | Per-file | Snapshot |
+| Vault registry | Central `%LOCALAPPDATA%\Seal\vaults.json` | - | - | - | - | - |
+| Natural language routing | SmolLM2 + rules | - | - | - | - | - |
 
 Each tool makes different tradeoffs for good reasons. Hashicorp Vault is the standard for enterprise secrets management at scale. VeraCrypt has decades of battle-tested full-disk encryption. Cryptomator and restic solve cloud-backed storage elegantly. Seal explores the space where **local encrypted storage, tamper-evident logging, and compliance reporting meet in a single zero-server package**.
 
@@ -55,14 +62,15 @@ The creator is open to **business audits, security reviews, and tailored deploym
 
 ## Interfaces
 
-Seal has two interfaces that both operate on the same vault:
+Seal has three interfaces that all operate on the same vault:
 
 | Interface | Launch | Best for |
 |-----------|--------|----------|
 | **CLI** | `seal save`, `seal load`, etc. | Scripting, automation, quick operations |
-| **TUI** | `seal tui` | Interactive browsing, searching, password generation |
+| **TUI** | `seal tui` | Interactive browsing, searching, file encrypt/decrypt, password generation |
+| **Agent** | `seal ask "..."` | Natural language routing to CLI commands |
 
-See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for complete usage instructions.
+See [USER_GUIDE.md](USER_GUIDE.md) for complete usage instructions.
 
 ## What It Does
 
@@ -96,8 +104,8 @@ pip install -e ".[dev]"
 # Initialize a vault
 seal init --path ./my-vault --passphrase "your-secret"
 
-# Save data
-seal save -n personal -i doc1 -d '{"username":"alice","password":"s3cret"}'
+# Save data (free-form namespace)
+seal save -n personal -i doc1 --kv username=alice --kv password=s3cret
 
 # Load it back
 seal load -n personal -i doc1
@@ -108,8 +116,20 @@ seal list -n personal
 # Verify integrity
 seal verify
 
+# Encrypt a file (no vault needed)
+seal encrypt -i secrets.txt -o secrets.txt.enc
+
+# Machine-readable JSON output (encrypt, decrypt, init, doctor, vaults list)
+seal encrypt -i secrets.txt -o secrets.txt.enc --json
+
+# No arguments lists registered vaults + help hint
+seal
+
 # Launch TUI (interactive terminal browser)
 seal tui
+
+# Natural language routing
+seal ask "save my gmail password"
 ```
 
 See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the full reference covering all CLI commands, TUI, and Python API.
@@ -134,49 +154,69 @@ data = vault.load("personal", "doc1")
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                     AegisVault                            │
-│              (save / load / delete / list)                │
-├────────────────────┬──────────────────┬──────────────────┤
-│     audit.py       │    canary.py     │    sharing.py    │
-│  SHA-256 chain     │  Decoy files     │  X25519 stanzas  │
-│  append-only log   │  Entropy monitor │  Multi-user DEK  │
-├────────────────────┴──────────────────┴──────────────────┤
-│                   KeyManager                              │
-│           PBKDF2 → DEK wrap/unwrap → manifest             │
-├──────────────────────────────────────────────────────────┤
-│                    AeadCipher                             │
-│          AES-256-GCM / ChaCha20-Poly1305                  │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                          cli.py                              │
+│              Click + Rich CLI (28 commands)                  │
+├──────────────────────────────────────────────────────────────┤
+│                      tui/app.py                              │
+│            Textual TUI (8 screens, vault picker)             │
+├──────────┬──────────┬──────────┬──────────┬─────────────────┤
+│  crypt_  │  audit   │  canary  │  report  │    sharing      │
+│ storage  │  .py     │   .py    │   .py    │      .py        │
+│  .py     │ SHA-256  │ Decoy    │ SOC2/    │  X25519         │
+│ Vault    │ chain    │ detection│ HIPAA/   │  stanzas        │
+│ facade   │ log      │ entropy  │ GDPR/    │  multi-user     │
+│          │          │ monitor  │ ISO27001 │                 │
+├──────────┴──────────┴──────────┴──────────┼─────────────────┤
+│          file_crypto.py                   │ vault_registry  │
+│   Standalone file/folder encryption       │     .py         │
+├───────────────────────────────────────────┼─────────────────┤
+│              agent.py                     │  biometric.py   │
+│     SmolLM2 + rule-based NL routing       │  Windows Hello  │
+├───────────────────────────────────────────┴─────────────────┤
+│                    key_manager.py                           │
+│         PBKDF2 (600K) → DEK wrap/unwrap → manifest         │
+├─────────────────────────────────────────────────────────────┤
+│                       cipher.py                             │
+│          AES-256-GCM / ChaCha20-Poly1305 AEAD              │
+├─────────────────────────────────────────────────────────────┤
+│                      _errors.py                             │
+│            9 custom exception classes                       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Namespaces
 
-| Namespace | Purpose |
-|-----------|---------|
+Namespaces are free-form labels — use any string you like:
+
+| Example | Purpose |
+|---------|---------|
 | `personal` | Personal documents, notes |
+| `banking` | Financial credentials |
 | `work` | Work-related files |
-| `archive` | Long-term storage |
+| `recipes` | Anything you want |
+
+Items are isolated by namespace — AAD binding prevents cross-namespace file swaps.
 
 ## Testing
 
-146 tests across 12 test files covering encryption, key management, storage, audit, canary detection, sharing, biometric, compliance reports, CLI integration, atomic writes, data leak prevention, and attack/robustness scenarios.
+**309 tests** — 252 unit tests (16 files) + 57 production integration tests (CLI invocations).
 
 ```bash
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run all 144 tests
+# Run all unit tests
 python -m pytest tests/ -v
+
+# Run production integration tests
+python tests/run_production.py
 
 # Run a specific test module
 python -m pytest tests/test_cipher.py -v
-
-# Run a single test
-python -m pytest tests/test_robustness.py::TestEdgeCases::test_unicode_data_roundtrip -v
 ```
 
-See [tests/TEST_DOCUMENTATION.md](tests/TEST_DOCUMENTATION.md) for the full indexed test catalog with explanations for every test case.
+See [docs/TEST_DOCUMENTATION.md](docs/TEST_DOCUMENTATION.md) for the full indexed test catalog with explanations for every test case.
 
 ## Benchmarks
 

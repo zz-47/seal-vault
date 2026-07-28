@@ -3,4 +3,8 @@ from aegis.tui.screens.vault import VaultScreen, NewItemScreen, EntryScreen, Del
 from aegis.tui.screens.generator import GeneratorScreen
 from aegis.tui.screens.canary import CanaryScreen
 from aegis.tui.screens.report import ReportScreen
-from aegis.tui.screens.picker import VaultPickerScreen
+from aegis.tui.screens.picker import VaultPickerScreen, RemoveVaultConfirmScreen
+from aegis.tui.screens.create_vault import CreateVaultScreen
+from aegis.tui.screens.file_crypto import FileCryptoScreen
+from aegis.tui.screens.help_screen import HelpScreen
+from aegis.tui.screens.file_browser import FileBrowserScreen

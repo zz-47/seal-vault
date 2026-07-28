@@ -34,8 +34,8 @@ packaging/dist/
 ## How It Works
 
 PyInstaller traces imports from `aegis.cli:cli` and bundles:
-- All `aegis` modules (cipher, key_manager, audit, canary, report, sharing, biometric)
-- TUI screens and widgets (Textual)
+- All `aegis` modules (cipher, key_manager, crypt_storage, audit, canary, report, sharing, biometric, file_crypto, vault_registry, agent)
+- TUI screens (picker, login, vault, generator, canary, report, file_crypto, file_browser, help_screen, create_vault)
 - Crypto libraries (cryptography C extensions)
 
 The build is `--onedir` by default (faster startup). Use `--onefile` for a single

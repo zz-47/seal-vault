@@ -3,6 +3,10 @@ services:
     build: .
     volumes:
       - vault-data:/data
+    environment:
+      - SEAL_VAULT=/data/my-vault
+    stdin_open: true
+    tty: true
     command: ["--help"]
 
 volumes:

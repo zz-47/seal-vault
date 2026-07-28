@@ -1,12 +1,49 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.screen import Screen
 from textual.widgets import DataTable, Static, Button, Label, Input
 from textual.containers import Vertical, Horizontal
+from textual.screen import Screen, ModalScreen
 from textual import on
 from textual.binding import Binding
 
+
+class CanaryRemoveConfirmScreen(ModalScreen):
+    """Require passphrase before removing all canaries."""
+
+    CSS = """
+    CanaryRemoveConfirmScreen {
+        align: center middle;
+    }
+    #remove-box { width: 50; height: auto; padding: 2 4; border: thick $error; background: $surface; }
+    #remove-box Label { width: 100%; text-align: center; margin-bottom: 1; }
+    #remove-passphrase { width: 100%; margin-top: 1; }
+    #confirm-btn { width: 100%; margin-top: 1; }
+    #cancel-btn { width: 100%; margin-top: 1; }
+    """
+    def compose(self) -> ComposeResult:
+        with Vertical(id="remove-box"):
+            yield Label("[bold red]Remove All Canaries[/]")
+            yield Label("Remove all canary files?\n[dim]This requires passphrase verification.[/]")
+            yield Input(password=True, placeholder="Enter passphrase to confirm", id="remove-passphrase")
+            yield Button("Remove", id="confirm-btn", variant="error")
+            yield Button("Cancel", id="cancel-btn", variant="default")
+    
+    @on(Button.Pressed, "#confirm-btn")
+    def confirm_remove(self):
+        entered = self.query_one("#remove-passphrase", Input).value
+        if entered != self.app.passphrase:
+            self.notify("Wrong passphrase", severity="error")
+            return
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel-btn")
+    def cancel_remove(self):
+        self.dismiss(False)
+
+    @on(Input.Submitted, "#remove-passphrase")
+    def on_passphrase_submitted(self):
+        self.confirm_remove()
 
 class CanaryScreen(Screen):
     """Canary deploy / check / remove / status."""
@@ -43,14 +80,15 @@ class CanaryScreen(Screen):
 
     def _load_status(self):
         app = self.app
-        if not hasattr(app, "_canary") or app._canary is None:
+        canary = getattr(app, '_canary', None)
+        if canary is None:
             try:
                 from aegis.canary import CanaryManager
-                app._canary = CanaryManager(app.base_path)
+                canary = CanaryManager(app.base_path)
+                app._canary = canary
             except Exception:
                 self.query_one("#status-bar", Static).update("Canary manager unavailable")
                 return
-        canary = app._canary
         table = self.query_one("#canary-table", DataTable)
         table.clear()
         for entry in canary.status():
@@ -63,14 +101,20 @@ class CanaryScreen(Screen):
 
     @on(Button.Pressed, "#deploy-btn")
     def deploy(self):
-        canary = self.app._canary
+        canary = getattr(self.app, '_canary', None)
+        if canary is None:
+            self.notify("Canary manager unavailable", severity="error")
+            return
         new = canary.deploy()
         self.notify(f"Deployed {len(new)} canary files", severity="success")
         self._load_status()
 
     @on(Button.Pressed, "#check-btn")
     def check(self):
-        canary = self.app._canary
+        canary = getattr(self.app, '_canary', None)
+        if canary is None:
+            self.notify("Canary manager unavailable", severity="error")
+            return
         result = canary.check_all()
         if result.has_alerts:
             parts = []
@@ -91,10 +135,16 @@ class CanaryScreen(Screen):
 
     @on(Button.Pressed, "#remove-btn")
     def remove(self):
-        canary = self.app._canary
-        count = canary.remove()
-        self.notify(f"Removed {count} canary files", severity="success")
-        self._load_status()
+        def on_confirm(result):
+            if result:
+                canary = getattr(self.app, '_canary', None)
+                if canary is None:
+                    self.notify("Canary manager unavailable", severity="error")
+                    return
+                count = canary.remove()
+                self.notify(f"Removed {count} canary files", severity="success")
+                self._load_status()
+        self.app.push_screen(CanaryRemoveConfirmScreen(), on_confirm)
 
     def action_go_back(self):
-        self.app.pop_screen()
+        self.app._pop_or_exit()

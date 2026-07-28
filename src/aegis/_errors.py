@@ -11,6 +11,7 @@ __all__ = [
     "ManifestError",
     "PermissionError",
     "IntegrityError",
+    "AuditIntegrityError",
 ]
 
 

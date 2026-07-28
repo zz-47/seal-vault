@@ -9,6 +9,7 @@ from aegis.tui.screens import (
     CanaryScreen,
     ReportScreen,
     VaultPickerScreen,
+    CreateVaultScreen,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "CanaryScreen",
     "ReportScreen",
     "VaultPickerScreen",
+    "CreateVaultScreen",
 ]

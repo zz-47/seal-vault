@@ -1,8 +1,9 @@
-# covers unauth personel detect.
+# looks for tampering inside vault files 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import hmac
@@ -31,7 +32,7 @@ _CANARY_DIR = ".canaries"
 _CANARY_MANIFEST = "canaries.json"
 _ENTROPY_THRESHOLD = 7.5
 
-# minimzes brute force.
+# lower = more predictable (e.g. repeated chars)
 def _shannon_entropy(data: bytes) -> float:
     if not data:
         return 0.0
@@ -51,6 +52,7 @@ def _generate_canary_content() -> tuple[bytes, str, float]:
     return content, h, entropy
 
 _HMAC_KEY_SEED = b"seal-canary-manifest"
+logger = logging.getLogger(__name__)
 
 
 def _derive_hmac_key(vault_path: Path) -> bytes:
@@ -168,7 +170,8 @@ class CanaryManager:
                 content, h, entropy = _generate_canary_content()
                 try:
                     canary_path.write_bytes(content)
-                except:
+                except OSError as e:
+                    logger.warning(f"Canary deployment failed for {canary_path}: {e}")
                     continue
                 cf = CanaryFile(name, str(canary_path), h, entropy)  
                 new_canaries.append(cf)

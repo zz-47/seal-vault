@@ -143,19 +143,15 @@ class TestVaultPickerScreen:
 
         assert VaultPickerScreen is not None
 
-    def test_count_entries(self, vault_path):
-        from aegis.tui.screens.picker import VaultPickerScreen
+    def test_registry_roundtrip(self, vault_path):
+        from aegis.vault_registry import register_vault, unregister_vault, load_registry
 
-        screen = VaultPickerScreen()
-        count = screen._count_entries(vault_path)
-        assert count == 3
-
-    def test_check_audit(self, vault_path):
-        from aegis.tui.screens.picker import VaultPickerScreen
-
-        screen = VaultPickerScreen()
-        ok = screen._check_audit(vault_path)
-        assert ok is True
+        register_vault("test-pick", str(vault_path))
+        entries = load_registry()
+        assert any(v["name"] == "test-pick" for v in entries)
+        assert unregister_vault("test-pick")
+        entries = load_registry()
+        assert not any(v["name"] == "test-pick" for v in entries)
 
 
 class TestAppBindings:

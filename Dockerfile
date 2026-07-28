@@ -7,7 +7,7 @@ COPY tests/ tests/
 COPY pyproject.toml .
 RUN pip install --no-cache-dir ".[dev]"
 
-RUN python -m pytest tests/ -v
+RUN python -m pytest tests/ -v && python tests/run_production.py
 
 ENTRYPOINT ["seal"]
 CMD ["--help"]

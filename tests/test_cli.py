@@ -40,7 +40,7 @@ class TestCLIVersion:
     def test_version(self, runner):
         result = runner.invoke(cli, ["version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert "0.3.0" in result.output
 
 
 class TestCLIHelp:
@@ -122,7 +122,7 @@ class TestCLISave:
 
     def test_save_invalid_namespace(self, runner, vault_path):
         args = _vault_args(vault_path) + [
-            "save", "-n", "bogus", "-i", "doc1", "-d", '{"x":1}',
+            "save", "-n", "", "-i", "doc1", "-d", '{"x":1}',
         ]
         result = runner.invoke(cli, args)
         assert result.exit_code != 0
@@ -271,7 +271,7 @@ class TestCLIVerify:
         log._persist()
         args = _vault_args(vault_path) + ["verify", "-F", "json"]
         result = runner.invoke(cli, args)
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         parsed = json.loads(result.output)
         assert parsed["audit_chain"] == "broken"
 
@@ -308,7 +308,7 @@ class TestCLICanary:
             f.write(os.urandom(1024))
         args = _vault_args(vault_path) + ["canary", "check"]
         result = runner.invoke(cli, args)
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "TRIGGERED" in result.output
 
     def test_canary_remove(self, runner, vault_path):

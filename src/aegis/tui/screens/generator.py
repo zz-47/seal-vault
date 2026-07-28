@@ -109,4 +109,4 @@ class GeneratorScreen(Screen):
             self.notify(f"Copy failed: {e}", severity="error")
 
     def action_go_back(self):
-        self.app.pop_screen()
+        self.app._pop_or_exit()

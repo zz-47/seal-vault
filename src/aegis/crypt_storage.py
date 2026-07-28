@@ -14,7 +14,6 @@ from aegis._errors import (
 
 _MANIFEST_DIR = "keys"
 _MANIFEST_FILE = "manifest.enc"
-_NAMESPACES = {"personal", "work", "archive"}
 _AAD_NAMESPACE_PREFIX = b"aegis_ns:"
 
 
@@ -35,14 +34,25 @@ class AegisVault:
         self._secure_delete = secure_delete
         self._keys_dir = self._base_path / _MANIFEST_DIR
         self._keys_dir.mkdir(parents=True, exist_ok=True)
-        if self._km._salt is None:
-            self._km.derive_master_key()
         self._manifest = self._load_manifest()
-        self._manifest_dirty = False
+        # Save the manifest immediately if it didn't exist, so the passphrase is
+        # validated on every subsequent open — even for empty vaults.
+        if not (self._keys_dir / _MANIFEST_FILE).exists():
+            self._km.derive_master_key()
+            self._save_manifest()
+            self._manifest_dirty = False
+        else:
+            self._manifest_dirty = False 
         self._audit = audit_log
         self._canary = canary_manager
 
     def _item_path(self, namespace: str, item_id: str) -> Path:
+        if "/" in item_id or "\\" in item_id or ".." in item_id:
+            raise LocalStorageError(
+                f"Invalid item_id: contains path characters",
+                hint="Use a simple identifier like 'gmail' or 'vpn-config'.",
+                code="invalid_item_id",
+            )
         return self._base_path / namespace / f"{item_id}.enc"
 
     def _check_canary(self) -> None:
@@ -72,10 +82,10 @@ class AegisVault:
     def save(self, namespace: str, item_id: str, data: dict) -> None:
         self._check_canary()
 
-        if namespace not in _NAMESPACES:
+        if not namespace or "/" in namespace or "\\" in namespace:
             raise LocalStorageError(
-                f"Unknown namespace '{namespace}'. Valid: {_NAMESPACES}",
-                hint="Use one of the registered namespaces.",
+                f"Invalid namespace '{namespace}'.",
+                hint="Use a simple name like 'personal' or 'banking'.",
                 code="invalid_namespace",
             )
 
@@ -117,10 +127,10 @@ class AegisVault:
     def load(self, namespace: str, item_id: str) -> dict:
         self._check_canary()
 
-        if namespace not in _NAMESPACES:
+        if not namespace or "/" in namespace or "\\" in namespace:
             raise LocalStorageError(
-                f"Unknown namespace '{namespace}'. Valid: {_NAMESPACES}",
-                hint="Use one of the registered namespaces.",
+                f"Invalid namespace '{namespace}'.",
+                hint="Use a simple name like 'personal' or 'banking'.",
                 code="invalid_namespace",
             )
 
@@ -151,10 +161,10 @@ class AegisVault:
     def delete(self, namespace: str, item_id: str) -> None:
         self._check_canary()
 
-        if namespace not in _NAMESPACES:
+        if not namespace or "/" in namespace or "\\" in namespace:
             raise LocalStorageError(
-                f"Unknown namespace '{namespace}'. Valid: {_NAMESPACES}",
-                hint="Use one of the registered namespaces.",
+                f"Invalid namespace '{namespace}'.",
+                hint="Use a simple name like 'personal' or 'banking'.",
                 code="invalid_namespace",
             )
 
