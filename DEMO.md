@@ -53,20 +53,22 @@ seal init -P ./my-vault -p "my-secret" --cipher chacha20
 
 ---
 
-## Find Vaults on Disk
+## Manage Multiple Vaults
 
-Seal doesn't track a global vault registry. A vault is any directory containing `keys/manifest.enc`. Find them with:
+Seal maintains a central registry at `~/.seal/vaults.json`. Register vaults once, then reference them by name.
 
-```powershell
-# Windows (PowerShell)
-Get-ChildItem -Path C:\Users\YOU -Recurse -Filter "manifest.enc" -ErrorAction SilentlyContinue | Select-Object FullName
+```bash
+# Register a vault
+seal vaults add -n work -P ./my-work-vault
 
-# Or find vault directories specifically
-Get-ChildItem -Path C:\Users\YOU\Documents -Recurse -Directory -Filter "keys" -ErrorAction SilentlyContinue | Where-Object { Test-Path "$($_.FullName)\manifest.enc" } | Select-Object FullName
+# List registered vaults
+seal vaults list
 
-# macOS / Linux
-find ~ -name "manifest.enc" 2>/dev/null
+# Remove from registry (doesn't delete files)
+seal vaults remove -n work
 ```
+
+The TUI opens a vault picker screen when launched without `-P`, letting you select from registered vaults.
 
 ---
 
@@ -93,7 +95,7 @@ seal save -P ./my-vault -n personal -i gmail --interactive
 |--------|-------------|
 | `-P, --path` | Vault directory |
 | `-p, --passphrase` | Master passphrase |
-| `-n, --ns` | Namespace: `personal`, `work`, `archive` |
+| `-n, --ns` | Namespace — any label you like (e.g. `personal`, `banking`, `recipes`) |
 | `-i, --id` | Item identifier |
 | `-d, --data` | JSON string or `@filename` |
 | `-f, --file` | Read JSON from file handle |
@@ -147,15 +149,15 @@ seal list -P ./my-vault -F json            # JSON output
 
 Output:
 ```
-personal/
-  gmail
-  wifi-home
+banking/
+  chase
+  schwab
+
+recipes/
+  cookies
 
 work/
   api-config
-
-archive/
-  (empty)
 ```
 
 | Option | Values | Default |
@@ -182,6 +184,30 @@ seal delete -P ./my-vault -n personal -i gmail       # prompts first
 | `-n, --ns` | Namespace |
 | `-i, --id` | Item identifier |
 | `-y, --yes` | Skip confirmation prompt |
+
+---
+
+## Encrypt / Decrypt Files
+
+Standalone file and folder encryption — no vault required.
+
+```bash
+# Encrypt a file
+seal encrypt -i secrets.txt -o secrets.txt.enc
+
+# Encrypt a folder (creates tar archive, then encrypts)
+seal encrypt -i ./my-folder -o ./my-folder.enc
+
+# Decrypt
+seal decrypt -i secrets.txt.enc -o secrets.txt
+seal decrypt -i my-folder.enc -o ./restored-folder
+```
+
+| Option | Description |
+|--------|-------------|
+| `-i, --input` | File or folder to encrypt/decrypt |
+| `-o, --output` | Output path |
+| `-p, --passphrase` | Encryption passphrase (prompted, confirmed) |
 
 ---
 
@@ -262,6 +288,20 @@ seal share remove -P ./my-vault -u <user-id>
 
 ---
 
+## Biometric Unlock (Windows Hello)
+
+Store your passphrase in the system keychain and unlock with fingerprint or face recognition.
+
+```bash
+# Store passphrase
+seal biometric enroll -P ./my-vault -p "my-passphrase"
+
+# Remove stored passphrase
+seal biometric remove
+```
+
+---
+
 ## Password Generator
 
 ### CLI
@@ -299,13 +339,46 @@ Checks: vault directory, keys directory, manifest, audit log chain, canary statu
 
 ---
 
+## Natural Language Agent
+
+Route natural language commands to Seal CLI actions. Uses SmolLM2-135M-Instruct (if `transformers` is installed) with rule-based fallback.
+
+```bash
+seal ask "save my gmail password"
+seal ask "list all passwords"
+seal ask "generate a 32 character password"
+seal ask "check vault health"
+seal ask "deploy canary"
+
+# Execute the routed command directly
+seal ask "save my wifi password" -x -P ./my-vault -p "pass"
+```
+
+The agent never sees decrypted data — it only maps natural language to CLI command arguments.
+
+---
+
 ## TUI (Terminal UI)
 
 ```bash
+seal tui
 seal tui -P ./my-vault
 ```
 
-### Screen 1: Login
+### Screen 1: Vault Picker (no -P path)
+
+When launched without `-P`, the TUI opens a vault picker showing registered vaults. Select a vault and click **Open** to proceed to login.
+
+```
+ Vaults
+ Name     Path                       Last Used
+ work     C:\Users\me\vaults\work    2026-07-28 14:30  ok
+ personal C:\Users\me\vaults\personal 2026-07-27 09:15  ok
+
+ [Add] [Remove] [Open]
+```
+
+### Screen 2: Login
 
 ```
 ┌─────────────────────────────────┐
@@ -323,7 +396,7 @@ seal tui -P ./my-vault
 - **Windows Hello**: Click **Unlock with Windows Hello** (if configured)
 - **Save passphrase**: Stores in Windows Hello for biometric unlock next time
 
-### Screen 2: Vault Browser
+### Screen 3: Vault Browser
 
 ```
  Search entries...                     ┌──────────────────────┐
@@ -358,13 +431,13 @@ seal tui -P ./my-vault
 | `Ctrl+Q` | Quit |
 | `Escape` | Go back / close screen |
 
-### Screen 3: New Entry (`Ctrl+N`)
+### Screen 4: New Entry (`Ctrl+N`)
 
 ```
 ┌─────────────────────────────────┐
 │ New Entry                       │
-│ Namespace: [personal ▾]         │
-│ Item ID:   [gmail           ]   │
+│ Namespace: [banking         ]   │
+│ Item ID:   [chase           ]   │
 │ Key-value pairs:                │
 │ ┌───────┐ ┌────────────┐ ┌──┐  │
 │ │ Key   │ │ Value      │ │X │  │
@@ -374,17 +447,17 @@ seal tui -P ./my-vault
 └─────────────────────────────────┘
 ```
 
-1. Pick namespace from dropdown
-2. Type item name (e.g. `gmail`)
-3. Fill key-value pairs (e.g. `user` = `alice@gmail.com`)
+1. Type any namespace label (e.g. `banking`, `recipes`, `work`)
+2. Type item name (e.g. `chase`)
+3. Fill key-value pairs (e.g. `user` = `bob`)
 4. Click **+ Add Field** for more rows, **X** to remove
 5. Click **Save**
 
-### Screen 4: Edit Entry (`Ctrl+E`)
+### Screen 5: Edit Entry (`Ctrl+E`)
 
 Select an entry in the table, press `Ctrl+E` to edit its raw JSON. Modify and click **Save**.
 
-### Screen 5: Password Generator (`Ctrl+G`)
+### Screen 6: Password Generator (`Ctrl+G`)
 
 ```
 ┌─────────────────────────────────┐
@@ -401,7 +474,7 @@ Select an entry in the table, press `Ctrl+E` to edit its raw JSON. Modify and cl
 - **Copy to Clipboard** — auto-clears after 30s
 - **Regenerate** — new random password
 
-### Screen 6: Compliance Report (`Ctrl+R`)
+### Screen 7: Compliance Report (`Ctrl+R`)
 
 ```
  Compliance Report
@@ -422,7 +495,7 @@ Select an entry in the table, press `Ctrl+E` to edit its raw JSON. Modify and cl
 2. Controls table shows compliance status
 3. Export buttons output JSON or Markdown
 
-### Screen 7: Canary Management (`Ctrl+Y`)
+### Screen 8: Canary Management (`Ctrl+Y`)
 
 ```
  Canary Management
@@ -447,9 +520,13 @@ Select an entry in the table, press `Ctrl+E` to edit its raw JSON. Modify and cl
 | Task | CLI Command |
 |------|------------|
 | Create a vault | `seal init -P ./vault` |
+| Encrypt/decrypt files | `seal encrypt -i file -o file.enc` |
 | Share vault access | `seal share add ...` |
 | Generate keypairs | `seal keygen` |
 | Run health diagnostics | `seal doctor -P ./vault` |
+| Manage vault registry | `seal vaults add/remove/list` |
+| Biometric enrollment | `seal biometric enroll` |
+| Natural language routing | `seal ask "..."` |
 
 ---
 
